@@ -1,0 +1,260 @@
+```{r packages}
+
+# instructions came from http://estebanmoro.org/post/2020-10-19-personal-art-map-with-r/
+
+library(tidyverse)
+library(osmdata)
+library(sf)
+library(tigris)
+library(jsonlite)
+library(data.table)
+library(osrm)
+
+```
+
+```{r gettings_roads}
+
+# getting proper town (can manually set latitude/longitude if I would prefer to
+# do that instead)
+
+bbx <- getbb("Salado, TX")
+
+# W 97°34'49"--W 97°29'40" / N 30°58'32"--N 30°54'26"
+
+min_lon <- -97.582; max_lon <- -97.4944444
+min_lat <- 30.9072222; max_lat <- 30.9755556
+bbx <- rbind(x=c(min_lon,max_lon),y=c(min_lat,max_lat))
+colnames(bbx) <- c("min","max")
+
+# getting roads to overlay (can specify values for only main types of
+# roads--"motorway", "trunk", "primary","secondary", "tertiary", "motorway_link",
+# "trunk_link", "primary_link", "secondary_link", "tertiary_link"--but Salado has
+# so few roads that the map looked pretty sparse)
+
+highways <- bbx %>%
+  opq()%>%
+  add_osm_feature(key = "highway", 
+                  value=c("motorway", "trunk",
+                          "primary","secondary", 
+                          "tertiary","motorway_link",
+                          "trunk_link","primary_link",
+                          "secondary_link",
+                          "tertiary_link")) %>%
+  osmdata_sf()
+
+streets <- bbx %>%
+  opq()%>%
+  add_osm_feature(key = "highway", 
+                  value = c("residential", "living_street",
+                            "service","unclassified",
+                            "pedestrian", "footway",
+                            "track","path")) %>%
+  osmdata_sf()
+
+# taking a peek at the roads
+
+ggplot() +
+  geom_sf(data = streets$osm_lines,
+          aes(color=highway),
+          size = .4,
+          alpha = .65)+
+  theme_void()
+
+# changing width of streets according to size
+
+color_roads <- "firebrick4"
+ggplot() +
+  geom_sf(data = streets$osm_lines,
+          col = color_roads,
+          size = .4,
+          alpha = .65) +
+  geom_sf(data = highways$osm_lines,
+          col = color_roads,
+          size = .6,
+          alpha = .8)+
+  coord_sf(xlim = c(min_lon,max_lon),
+           ylim = c(min_lat,max_lat),
+         expand = FALSE)+
+  theme(legend.position = F) + theme_void()
+
+```
+
+```{r geography}
+
+# getting landmass
+
+counties_TX <- counties(state="TX",cb=T,class="sf",)
+counties_TX <- st_crop(counties_TX,
+                       xmin=min_lon,xmax=max_lon,
+                       ymin=min_lat,ymax=max_lat)
+ggplot() + 
+  geom_sf(data=counties_TX,fill="gray",lwd=0)+
+  coord_sf(xlim = c(min(bbx[1,]), max(bbx[1,])), 
+         ylim = c(min(bbx[2,]), max(bbx[2,])),
+         expand = FALSE)+
+  theme(legend.position = F) + theme_void()
+
+# adding water
+
+get_water <- function(county_GEOID){
+  area_water("TX", county_GEOID, class = "sf")
+}
+water <- do.call(rbind, 
+                 lapply(counties_TX$COUNTYFP,get_water))
+water <- st_crop(water,
+                 xmin=min_lon,xmax=max_lon,
+                 ymin=min_lat,ymax=max_lat)
+
+# looking at water
+
+ggplot() + 
+  geom_sf(data=counties_TX)+
+  geom_sf(data=water,
+          inherit.aes = F,
+          col="red")+
+  coord_sf(xlim = c(min(bbx[1,]), max(bbx[1,])), 
+         ylim = c(min(bbx[2,]), max(bbx[2,])),
+         expand = FALSE)+
+  theme(legend.position = F) + theme_void()
+
+# carving water out from the counties polygon
+
+st_erase <- function(x, y) {
+  st_difference(x, st_union(y))
+}
+counties_TX <- st_erase(counties_TX,water)
+
+# taking a look at progress
+
+ggplot() + 
+  geom_sf(data=counties_TX,
+          lwd=0)+
+  coord_sf(xlim = c(min(bbx[1,]), max(bbx[1,])), 
+         ylim = c(min(bbx[2,]), max(bbx[2,])),
+         expand = FALSE)+
+  theme(legend.position = F) + theme_void()
+
+# playing around with color schemes... change fill values for geom_sf() and
+# theme(panel.background = element_rect())
+
+ggplot() + 
+  geom_sf(data=counties_TX,
+          inherit.aes= FALSE,
+          lwd=0.0,fill=rgb(0.95,0.95,0.95))+
+  coord_sf(xlim = c(min(bbx[1,]), max(bbx[1,])), 
+         ylim = c(min(bbx[2,]), max(bbx[2,])),
+         expand = FALSE)+
+  theme(legend.position = F) + theme_void()+
+  theme(panel.background=
+          element_rect(fill = "lightskyblue2"))
+
+```
+
+```{r putting_together}
+
+ggplot() + 
+  geom_sf(data=counties_TX,
+          inherit.aes= FALSE,
+          lwd=0.0,fill=rgb(0.95,0.95,0.95))+
+  geom_sf(data = streets$osm_lines,
+          inherit.aes = FALSE,
+          color=color_roads,
+          size = .4,
+          alpha = .65) +
+  geom_sf(data = highways$osm_lines,
+          inherit.aes = FALSE,
+          color=color_roads,
+          size = .6,
+          alpha = .65) +
+  coord_sf(xlim = c(min(bbx[1,]), max(bbx[1,])), 
+           ylim = c(min(bbx[2,]), max(bbx[2,])),
+           expand = FALSE) +
+  theme(legend.position = F) + theme_void()+
+  theme(panel.background=
+          element_rect(fill = "lightskyblue2"))
+
+# adding mobility
+
+path <- "./Semantic Location History/"
+files <- list.files(path,pattern="*.json",recursive=T)
+get_locations <- function(f){
+  data <- jsonlite::fromJSON(paste0(path,f))
+  tlObj <- data$timelineObjects$placeVisit
+  loc <- cbind(tlObj$location,tlObj$duration)
+  tt <- as.numeric(loc$startTimestampMs)/1000
+  loc$time<-as.POSIXct(tt,origin = "1970-01-01")
+  #conver longitude & latitude from E7 to GPS 
+  loc$lat = loc$latitudeE7 / 1e7
+  loc$lon = loc$longitudeE7 / 1e7
+  loc <- data.table(loc)
+  loc <- loc[,c("placeId","time","lat","lon")]
+  loc <- loc[!is.na(lon)]
+}
+locs.df<-rbindlist(lapply(files,get_locations))
+
+# adding home
+
+daily_routes <- function(date){
+  ll<-locs.df[as.Date(time)==date,c("lon","lat")]
+  #add home early in the morning
+  ll<-rbind(data.table(lon=-97.577940,lat=30.921710),ll)
+  #add home late in the day
+  ll<-rbind(ll,data.table(lon=-97.577940,lat=30.921710))
+  route <- NULL
+  for(j in 2:nrow(ll)){
+    p1 <- c(ll$lon[j-1],ll$lat[j-1])
+    p2 <- c(ll$lon[j],ll$lat[j])
+    oo <- osrmRoute(src=p1,dst=p2,returnclass = "sf",
+                    overview="full")
+    route <- rbind(route,oo)
+  }
+  route
+}
+
+# get all routes
+
+dates <- unique(as.Date(locs.df$time))
+routes <- do.call(rbind, lapply(dates), daily_routes)
+
+```
+
+```{r final_map}
+
+# make color prettier
+
+final_map <- ggplot() + 
+  geom_sf(data=counties_TX,
+          inherit.aes= FALSE,
+          lwd=0.0,fill= "white")+
+  geom_sf(data = streets$osm_lines,
+          inherit.aes = FALSE,
+          color=color_roads,
+          size = .4,
+          alpha = .65) +
+  geom_sf(data = highways$osm_lines,
+          inherit.aes = FALSE,
+          color=color_roads,
+          size = .6,
+          alpha = .65) +
+  # geom_sf(data=st_geometry(routes),
+  #         inherit.aes = FALSE,col="red",alpha=0.5)+ 
+  coord_sf(xlim = c(min(bbx[1,]), max(bbx[1,])), 
+           ylim = c(min(bbx[2,]), max(bbx[2,])),
+           expand = FALSE) +
+  theme(legend.position = F) + theme_void()+
+  theme(panel.background=
+          element_rect(fill=rgb(0.92,0.679,0.105)))
+final_map
+
+# save when the time comes
+
+# ggsave(final_map, 
+#        filename = "my_personal_map_art.png",
+#        scale = 1, 
+#        width = 36, 
+#        height = 24, 
+#        units = "in",
+#        dpi = 500)
+
+```
+
